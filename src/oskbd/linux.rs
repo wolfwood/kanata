@@ -2,7 +2,7 @@
 
 #![cfg_attr(feature = "simulated_output", allow(dead_code, unused_imports))]
 
-use evdev::{uinput, Device, EventType, InputEvent, RelativeAxisType};
+use evdev::{uinput, Device, EventType, InputEvent, RelativeAxisCode, RelativeAxisEvent};
 use inotify::{Inotify, WatchMask};
 use mio::{unix::SourceFd, Events, Interest, Poll, Token};
 use nix::ioctl_read_buf;
@@ -233,13 +233,13 @@ impl KbdIn {
 }
 
 pub fn is_input_device(device: &Device) -> bool {
-    use evdev::Key;
+    use evdev::KeyCode;
     let is_keyboard = device
         .supported_keys()
-        .map_or(false, |keys| keys.contains(Key::KEY_ENTER));
+        .map_or(false, |keys| keys.contains(KeyCode::KEY_ENTER));
     let is_mouse = device
         .supported_relative_axes()
-        .map_or(false, |axes| axes.contains(RelativeAxisType::REL_X));
+        .map_or(false, |axes| axes.contains(RelativeAxisCode::REL_X));
     if is_keyboard || is_mouse {
         if device.name() == Some("kanata") {
             return false;
@@ -270,22 +270,22 @@ impl TryFrom<InputEvent> for KeyEvent {
     type Error = ();
     fn try_from(item: InputEvent) -> Result<Self, Self::Error> {
         use OsCode::*;
-        match item.kind() {
-            evdev::InputEventKind::Key(k) => Ok(Self {
+        match item.destructure() {
+            evdev::EventSummary::Key(_, k, v) => Ok(Self {
                 code: OsCode::from_u16(k.0).ok_or(())?,
-                value: KeyValue::from(item.value()),
+                value: KeyValue::from(v),
             }),
-            evdev::InputEventKind::RelAxis(axis_type) => {
-                let dist = item.value();
+            evdev::EventSummary::RelativeAxis(_,axis_type, value) => {
+                let dist = value;
                 let code: OsCode = match axis_type {
-                    RelativeAxisType::REL_WHEEL | RelativeAxisType::REL_WHEEL_HI_RES => {
+                    RelativeAxisCode::REL_WHEEL | RelativeAxisCode::REL_WHEEL_HI_RES => {
                         if dist > 0 {
                             MouseWheelUp
                         } else {
                             MouseWheelDown
                         }
                     }
-                    RelativeAxisType::REL_HWHEEL | RelativeAxisType::REL_HWHEEL_HI_RES => {
+                    RelativeAxisCode::REL_HWHEEL | RelativeAxisCode::REL_HWHEEL_HI_RES => {
                         if dist > 0 {
                             MouseWheelRight
                         } else {
@@ -306,7 +306,7 @@ impl TryFrom<InputEvent> for KeyEvent {
 
 impl From<KeyEvent> for InputEvent {
     fn from(item: KeyEvent) -> Self {
-        InputEvent::new(EventType::KEY, item.code as u16, item.value as i32)
+        KeyEvent::new(item.code, item.value).into()
     }
 }
 
@@ -329,20 +329,20 @@ impl KbdOut {
         // TODO investigate the rare possibility that a device is e.g. a Joystick and a Keyboard or a Mouse at the same time, which could lead to lost events
 
         // For some reason 0..0x300 (max value for a key) doesn't work, the closest that I've got to work is 560
-        let keys = evdev::AttributeSet::from_iter((0..560).map(evdev::Key));
+        let keys = evdev::AttributeSet::from_iter((0..560).map(evdev::KeyCode));
         let relative_axes = evdev::AttributeSet::from_iter([
-            RelativeAxisType::REL_WHEEL,
-            RelativeAxisType::REL_HWHEEL,
-            RelativeAxisType::REL_X,
-            RelativeAxisType::REL_Y,
-            RelativeAxisType::REL_Z,
-            RelativeAxisType::REL_RX,
-            RelativeAxisType::REL_RY,
-            RelativeAxisType::REL_RZ,
-            RelativeAxisType::REL_DIAL,
-            RelativeAxisType::REL_MISC,
-            RelativeAxisType::REL_WHEEL_HI_RES,
-            RelativeAxisType::REL_HWHEEL_HI_RES,
+            RelativeAxisCode::REL_WHEEL,
+            RelativeAxisCode::REL_HWHEEL,
+            RelativeAxisCode::REL_X,
+            RelativeAxisCode::REL_Y,
+            RelativeAxisCode::REL_Z,
+            RelativeAxisCode::REL_RX,
+            RelativeAxisCode::REL_RY,
+            RelativeAxisCode::REL_RZ,
+            RelativeAxisCode::REL_DIAL,
+            RelativeAxisCode::REL_MISC,
+            RelativeAxisCode::REL_WHEEL_HI_RES,
+            RelativeAxisCode::REL_HWHEEL_HI_RES,
         ]);
 
         let mut device = uinput::VirtualDeviceBuilder::new()?
@@ -436,7 +436,7 @@ impl KbdOut {
     }
 
     pub fn write_code(&mut self, code: u32, value: KeyValue) -> Result<(), io::Error> {
-        let event = InputEvent::new(EventType::KEY, code as u16, value as i32);
+        let event = KeyEvent::new( OsCode::from(code), value).into();
         self.device.emit(&[event])?;
         Ok(())
     }
@@ -523,12 +523,11 @@ impl KbdOut {
             }
         }
 
-        let hi_res_scroll_event = InputEvent::new(
-            EventType::RELATIVE,
+        let hi_res_scroll_event = RelativeAxisEvent::new(
             match direction {
-                MWheelDirection::Up | MWheelDirection::Down => RelativeAxisType::REL_WHEEL_HI_RES.0,
+                MWheelDirection::Up | MWheelDirection::Down => RelativeAxisCode::REL_WHEEL_HI_RES,
                 MWheelDirection::Left | MWheelDirection::Right => {
-                    RelativeAxisType::REL_HWHEEL_HI_RES.0
+                    RelativeAxisCode::REL_HWHEEL_HI_RES
                 }
             },
             match direction {
@@ -539,15 +538,14 @@ impl KbdOut {
 
         if lo_res_distance > 0 {
             self.write_many(&[
-                hi_res_scroll_event,
-                InputEvent::new(
-                    EventType::RELATIVE,
+                hi_res_scroll_event.into(),
+                RelativeAxisEvent::new(
                     match direction {
                         MWheelDirection::Up | MWheelDirection::Down => {
-                            RelativeAxisType::REL_WHEEL.0
+                            RelativeAxisCode::REL_WHEEL
                         }
                         MWheelDirection::Left | MWheelDirection::Right => {
-                            RelativeAxisType::REL_HWHEEL.0
+                            RelativeAxisCode::REL_HWHEEL
                         }
                     },
                     match direction {
@@ -556,33 +554,33 @@ impl KbdOut {
                             -i32::from(lo_res_distance)
                         }
                     },
-                ),
+                ).into(),
             ])
         } else {
-            self.write(hi_res_scroll_event)
+            self.write(hi_res_scroll_event.into())
         }
     }
 
     pub fn move_mouse(&mut self, mv: CalculatedMouseMove) -> Result<(), io::Error> {
         let (axis, distance) = match mv.direction {
-            MoveDirection::Up => (RelativeAxisType::REL_Y, -i32::from(mv.distance)),
-            MoveDirection::Down => (RelativeAxisType::REL_Y, i32::from(mv.distance)),
-            MoveDirection::Left => (RelativeAxisType::REL_X, -i32::from(mv.distance)),
-            MoveDirection::Right => (RelativeAxisType::REL_X, i32::from(mv.distance)),
+            MoveDirection::Up => (RelativeAxisCode::REL_Y, -i32::from(mv.distance)),
+            MoveDirection::Down => (RelativeAxisCode::REL_Y, i32::from(mv.distance)),
+            MoveDirection::Left => (RelativeAxisCode::REL_X, -i32::from(mv.distance)),
+            MoveDirection::Right => (RelativeAxisCode::REL_X, i32::from(mv.distance)),
         };
-        self.write(InputEvent::new(EventType::RELATIVE, axis.0, distance))
+        self.write(RelativeAxisEvent::new(axis, distance).into())
     }
 
     pub fn move_mouse_many(&mut self, moves: &[CalculatedMouseMove]) -> Result<(), io::Error> {
         let mut events = vec![];
         for mv in moves {
             let (axis, distance) = match mv.direction {
-                MoveDirection::Up => (RelativeAxisType::REL_Y, -i32::from(mv.distance)),
-                MoveDirection::Down => (RelativeAxisType::REL_Y, i32::from(mv.distance)),
-                MoveDirection::Left => (RelativeAxisType::REL_X, -i32::from(mv.distance)),
-                MoveDirection::Right => (RelativeAxisType::REL_X, i32::from(mv.distance)),
+                MoveDirection::Up => (RelativeAxisCode::REL_Y, -i32::from(mv.distance)),
+                MoveDirection::Down => (RelativeAxisCode::REL_Y, i32::from(mv.distance)),
+                MoveDirection::Left => (RelativeAxisCode::REL_X, -i32::from(mv.distance)),
+                MoveDirection::Right => (RelativeAxisCode::REL_X, i32::from(mv.distance)),
             };
-            events.push(InputEvent::new(EventType::RELATIVE, axis.0, distance));
+            events.push(RelativeAxisEvent::new(axis, distance).into());
         }
         self.write_many(&events)
     }
