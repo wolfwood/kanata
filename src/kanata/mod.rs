@@ -18,6 +18,7 @@ use kanata_keyberon::layout::{CustomEvent, Event, Layout, State};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time;
+use std::time::Instant;
 
 use crate::oskbd::{KeyEvent, *};
 #[cfg(feature = "tcp_server")]
@@ -242,6 +243,8 @@ pub struct Kanata {
     pub macro_on_press_cancel_duration: u32,
     /// Stores user's saved clipboard contents.
     pub saved_clipboard_content: SavedClipboardData,
+    /// timestamp
+    pub automousekeys_timestamp: Option<Instant>,
 }
 
 #[derive(PartialEq, Clone, Copy)]
@@ -446,6 +449,7 @@ impl Kanata {
             allow_hardware_repeat: cfg.options.allow_hardware_repeat,
             macro_on_press_cancel_duration: 0,
             saved_clipboard_content: Default::default(),
+            automousekeys_timestamp: None,
         })
     }
 
@@ -582,6 +586,7 @@ impl Kanata {
             allow_hardware_repeat: cfg.options.allow_hardware_repeat,
             macro_on_press_cancel_duration: 0,
             saved_clipboard_content: Default::default(),
+            automousekeys_timestamp: None,
         })
     }
 

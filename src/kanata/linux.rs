@@ -10,6 +10,7 @@ use parking_lot::Mutex;
 use std::convert::TryFrom;
 use std::sync::mpsc::SyncSender as Sender;
 use std::sync::Arc;
+use std::time::Duration;
 
 use super::*;
 
@@ -44,6 +45,53 @@ impl Kanata {
             log::trace!("event count: {}\nevents:\n{events:?}", events.len());
 
             for in_event in events.iter().copied() {
+                match in_event.kind() {
+                    InputEventKind::RelAxis(_) => {
+                        let mut sendflag = false;
+                        {
+                            let mut kanata = kanata.lock();
+                            if kanata.automousekeys_timestamp.is_none() {
+                                log::info!("Mouse Layer On");
+                                sendflag = true;
+                            }
+                            kanata.automousekeys_timestamp = Some(Instant::now());
+                        }
+
+                        // Send key events to the processing loop
+                        if sendflag {
+                            let fake_event = KeyEvent::new(OsCode::KEY_F24, KeyValue::Press);
+                            if let Err(e) = tx.try_send(fake_event) {
+                                bail!("failed to send on channel: {}", e)
+                            }
+                        }
+                    }
+                    _ => {
+                        let mut sendflag = false;
+                        {
+                            let mut kanata = kanata.lock();
+                            if let Some(ts) = kanata.automousekeys_timestamp {
+                                match Instant::now().checked_duration_since(ts) {
+                                    Some(dur) => if dur > Duration::from_millis(750)
+                                    {
+                                        log::info!("Mouse Layer Off");
+                                        kanata.automousekeys_timestamp = None;
+                                        sendflag = true;
+                                    }
+                                    None => ()
+                                }
+                            }
+                        }
+
+                        // Send key events to the processing loop
+                        if sendflag {
+                            let fake_event = KeyEvent::new(OsCode::KEY_F24, KeyValue::Release);
+                            if let Err(e) = tx.try_send(fake_event) {
+                                bail!("failed to send on channel: {}", e)
+                            }
+                        }
+                    }
+                }
+
                 let key_event = match KeyEvent::try_from(in_event) {
                     Ok(ev) => ev,
                     _ => {
